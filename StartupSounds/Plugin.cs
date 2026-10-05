@@ -32,7 +32,6 @@ public class Plugin : BasePatcher
     private static IWaveSource? currentSource;
     private static IWaveSource? loadingSource;
     private static readonly HashSet<ISoundOut> activeSounds = new();
-    private static readonly MMDeviceEnumerator globalEnumerator = new();
     private static volatile bool shouldContinueMonitoring = true;
     private static volatile bool phaseWatcherStarted;
     private static DateTime lastPhaseSoundTime = DateTime.MinValue;
@@ -192,76 +191,77 @@ public class Plugin : BasePatcher
         });
     }
 
-    private static ISoundOut? PlaySound(string soundPath, float initialVolume = 1.0f, bool loop = false, bool track = true)
-    {
-        try
-        {
-            IWaveSource waveSource = CodecFactory.Instance.GetCodec(soundPath);
+	private static ISoundOut? PlaySound(string soundPath, float initialVolume = 1.0f, bool loop = false, bool track = true)
+	{
+		try
+		{
+			IWaveSource waveSource = CodecFactory.Instance.GetCodec(soundPath);
 
-            if (loop)
-                waveSource = new LoopStream(waveSource) { EnableLoop = true };
+			if (loop)
+				waveSource = new LoopStream(waveSource) { EnableLoop = true };
 
-            int targetSampleRate = 48000;
-            int targetChannels = 2;
+			int targetSampleRate = 48000;
+			int targetChannels = 2;
 
-            try
-            {
-                using var device = globalEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
-                targetSampleRate = device.DeviceFormat.SampleRate;
-                targetChannels = device.DeviceFormat.Channels;
-            }
-            catch (Exception ex)
-            {
-                Log.LogWarning($"Could not fetch device format, falling back to 48kHz Stereo: {ex.Message}");
-            }
+			try
+			{
+				using var tempEnumerator = new MMDeviceEnumerator();
+				using var device = tempEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
+				targetSampleRate = device.DeviceFormat.SampleRate;
+				targetChannels = device.DeviceFormat.Channels;
+			}
+			catch (Exception ex)
+			{
+				Log.LogWarning($"Could not fetch device format safely, falling back to 48kHz Stereo: {ex.Message}");
+			}
 
-            if (waveSource.WaveFormat.SampleRate != targetSampleRate)
-            {
-                waveSource = new DmoResampler(waveSource, new WaveFormat(targetSampleRate, waveSource.WaveFormat.BitsPerSample, waveSource.WaveFormat.Channels));
-            }
+			if (waveSource.WaveFormat.SampleRate != targetSampleRate)
+			{
+				waveSource = new DmoResampler(waveSource, new WaveFormat(targetSampleRate, waveSource.WaveFormat.BitsPerSample, waveSource.WaveFormat.Channels));
+			}
 
-            if (waveSource.WaveFormat.Channels == 1 && targetChannels >= 2)
-            {
-                waveSource = waveSource.ToSampleSource().ToStereo().ToWaveSource();
-            }
+			if (waveSource.WaveFormat.Channels == 1 && targetChannels >= 2)
+			{
+				waveSource = waveSource.ToSampleSource().ToStereo().ToWaveSource();
+			}
 
-            WasapiOut soundOut = new();
-            soundOut.Initialize(waveSource);
-            soundOut.Volume = initialVolume;
+			WasapiOut soundOut = new();
+			soundOut.Initialize(waveSource);
+			soundOut.Volume = initialVolume;
 
-            lock (activeSounds) { activeSounds.Add(soundOut); }
+			lock (activeSounds) { activeSounds.Add(soundOut); }
 
-            soundOut.Stopped += (s, e) =>
-            {
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(100);
+			soundOut.Stopped += (s, e) =>
+			{
+				_ = Task.Run(async () =>
+				{
+					await Task.Delay(100);
 
-                    try { soundOut.Dispose(); } catch { }
-                    try { waveSource.Dispose(); } catch { }
+					try { soundOut.Dispose(); } catch { }
+					try { waveSource.Dispose(); } catch { }
 
-                    lock (activeSounds) { activeSounds.Remove(soundOut); }
-                });
-            };
+					lock (activeSounds) { activeSounds.Remove(soundOut); }
+				});
+			};
 
-            soundOut.Play();
+			soundOut.Play();
 
-            if (track)
-            {
-                currentSource = waveSource;
-                currentPlayer = soundOut;
-            }
+			if (track)
+			{
+				currentSource = waveSource;
+				currentPlayer = soundOut;
+			}
 
-            return soundOut;
-        }
-        catch (Exception ex)
-        {
-            Log.LogError($"Failed to play sound {soundPath}: {ex.Message}");
-            return null;
-        }
-    }
+			return soundOut;
+		}
+		catch (Exception ex)
+		{
+			Log.LogError($"Failed to play sound {soundPath}: {ex.Message}");
+			return null;
+		}
+	}
 
-    private static async Task EngineStateSounds()
+	private static async Task EngineStateSounds()
     {
         try
         {
